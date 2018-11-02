@@ -90,20 +90,21 @@ private[alpakka] final class S3Stream(settings: S3Settings)(implicit system: Act
   def download(s3Location: S3Location,
                range: Option[ByteRange],
                versionId: Option[String],
-               sse: Option[ServerSideEncryption]): (Source[ByteString, NotUsed], Future[ObjectMetadata]) = {
+               sse: Option[ServerSideEncryption]): Future[Option[(Source[ByteString, NotUsed], ObjectMetadata)]] = {
     import mat.executionContext
     val s3Headers = S3Headers(sse.fold[Seq[HttpHeader]](Seq.empty) { _.headersFor(GetObject) })
     val future = request(s3Location, rangeOption = range, versionId = versionId, s3Headers = s3Headers)
       .map(response => response.withEntity(response.entity.withoutSizeLimit))
       .flatMap(entityForSuccess)
-    val source = Source
-      .fromFuture(future.map(_._1))
-      .map(_.dataBytes)
-      .flatMapConcat(identity)
-    val meta = future.map {
-      case (entity, headers) ⇒ computeMetaData(headers, entity)
-    }
-    (source, meta)
+
+    future
+      .map {
+        case (entity, headers) =>
+          Some((entity.dataBytes.mapMaterializedValue(_ => NotUsed), computeMetaData(headers, entity)))
+      }
+      .recover {
+        case e: S3Exception if e.code == "NoSuchKey" => None
+      }
   }
 
   def listBucket(bucket: String, prefix: Option[String] = None): Source[ListBucketResultContents, NotUsed] = {
@@ -380,6 +381,8 @@ private[alpakka] final class S3Stream(settings: S3Settings)(implicit system: Act
       sse: Option[ServerSideEncryption]
   )(parallelism: Int): Flow[ByteString, UploadPartResponse, NotUsed] = {
 
+    import mat.executionContext
+
     // Multipart upload requests (except for the completion api) are created here.
     //  The initial upload request gets executed within this function as well.
     //  The individual upload part requests are created.
@@ -388,15 +391,29 @@ private[alpakka] final class S3Stream(settings: S3Settings)(implicit system: Act
     // The individual upload part requests are processed here
     requestFlow
       .via(Http().superPool[(MultipartUpload, Int)]())
-      .map {
+      .mapAsync(parallelism) {
         case (Success(r), (upload, index)) =>
-          r.entity.dataBytes.runWith(Sink.ignore)
-          val etag = r.headers.find(_.lowercaseName() == "etag").map(_.value)
-          etag
-            .map((t) => SuccessfulUploadPart(upload, index, t))
-            .getOrElse(FailedUploadPart(upload, index, new RuntimeException(s"Cannot find etag in ${r}")))
+          if (r.status.isFailure()) {
+            Unmarshal(r.entity).to[String].map { errorBody =>
+              FailedUploadPart(
+                upload,
+                index,
+                new RuntimeException(
+                  s"Upload part $index request failed. Response header: ($r), response body: ($errorBody)."
+                )
+              )
+            }
+          } else {
+            r.entity.dataBytes.runWith(Sink.ignore)
+            val etag = r.headers.find(_.lowercaseName() == "etag").map(_.value)
+            etag
+              .map(t => Future.successful(SuccessfulUploadPart(upload, index, t)))
+              .getOrElse(
+                Future.successful(FailedUploadPart(upload, index, new RuntimeException(s"Cannot find etag in ${r}")))
+              )
+          }
 
-        case (Failure(e), (upload, index)) => FailedUploadPart(upload, index, e)
+        case (Failure(e), (upload, index)) => Future.successful(FailedUploadPart(upload, index, e))
       }
   }
 

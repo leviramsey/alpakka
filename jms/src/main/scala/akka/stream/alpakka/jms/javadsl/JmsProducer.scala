@@ -6,11 +6,13 @@ package akka.stream.alpakka.jms.javadsl
 
 import java.util.concurrent.CompletionStage
 
-import akka.{Done, NotUsed}
-import akka.stream.alpakka.jms.{JmsMessage, JmsProducerSettings, JmsProducerStage}
+import akka.stream.alpakka.jms.{scaladsl, JmsMessage, JmsProducerSettings}
+import akka.stream.alpakka.jms.JmsProducerMessage._
+import akka.stream.javadsl.Source
 import akka.stream.scaladsl.{Flow, Keep}
+import akka.{Done, NotUsed}
 
-import scala.collection.JavaConversions
+import scala.collection.JavaConverters._
 import scala.compat.java8.FutureConverters
 
 object JmsProducer {
@@ -20,8 +22,19 @@ object JmsProducer {
    */
   def flow[R <: JmsMessage](
       settings: JmsProducerSettings
-  ): akka.stream.javadsl.Flow[R, R, NotUsed] =
-    akka.stream.alpakka.jms.scaladsl.JmsProducer.flow(settings).asJava
+  ): akka.stream.javadsl.Flow[R, R, JmsProducerStatus] =
+    akka.stream.alpakka.jms.scaladsl.JmsProducer.flow(settings).mapMaterializedValue(toProducerStatus).asJava
+
+  /**
+   * Java API: Creates an [[JmsProducer]] for [[Envelope]]s
+   */
+  def flexiFlow[R <: JmsMessage, PassThrough](
+      settings: JmsProducerSettings
+  ): akka.stream.javadsl.Flow[Envelope[R, PassThrough], Envelope[R, PassThrough], JmsProducerStatus] =
+    akka.stream.alpakka.jms.scaladsl.JmsProducer
+      .flexiFlow[R, PassThrough](settings)
+      .mapMaterializedValue(toProducerStatus)
+      .asJava
 
   /**
    * Java API: Creates an [[JmsProducer]] for [[JmsMessage]]s
@@ -64,7 +77,7 @@ object JmsProducer {
         .mapSink(settings)
         .mapMaterializedValue(FutureConverters.toJava)
     val javaToScalaConversion =
-      Flow.fromFunction((javaMap: java.util.Map[String, Any]) => JavaConversions.mapAsScalaMap(javaMap).toMap)
+      Flow.fromFunction((javaMap: java.util.Map[String, Any]) => javaMap.asScala.toMap)
     javaToScalaConversion.toMat(scalaSink)(Keep.right).asJava
   }
 
@@ -79,4 +92,9 @@ object JmsProducer {
       .mapMaterializedValue(FutureConverters.toJava)
       .asJava
 
+  private def toProducerStatus(scalaStatus: scaladsl.JmsProducerStatus) = new JmsProducerStatus {
+
+    override def connectorState: Source[JmsConnectorState, NotUsed] =
+      scalaStatus.connectorState.map(_.asJava).asJava
+  }
 }

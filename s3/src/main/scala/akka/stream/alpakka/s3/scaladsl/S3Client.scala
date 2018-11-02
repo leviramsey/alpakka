@@ -8,11 +8,17 @@ import java.time.Instant
 
 import akka.actor.ActorSystem
 import akka.http.scaladsl.model._
-import akka.http.scaladsl.model.headers.{`Content-Length`, `Last-Modified`, ByteRange, ETag}
+import akka.http.scaladsl.model.headers.{
+  `Cache-Control`,
+  `Content-Length`,
+  `Content-Type`,
+  `Last-Modified`,
+  ByteRange,
+  ETag
+}
 import akka.stream.Materializer
 import akka.stream.alpakka.s3.S3Settings
 import akka.stream.alpakka.s3.acl.CannedAcl
-import akka.stream.alpakka.s3.auth.{AWSCredentials => OldAWSCredentials}
 import akka.stream.alpakka.s3.impl._
 import akka.stream.scaladsl.{Sink, Source}
 import akka.util.ByteString
@@ -132,7 +138,7 @@ final class ObjectMetadata private (
    * @see ObjectMetadata#setContentType(String)
    */
   lazy val contentType: Option[String] = metadata.collectFirst {
-    case h if h.lowercaseName() == "content-type" => h.value
+    case ct: `Content-Type` => ct.value
   }
 
   /**
@@ -146,6 +152,13 @@ final class ObjectMetadata private (
   lazy val lastModified: DateTime = metadata.collectFirst {
     case ct: `Last-Modified` => ct.date
   }.get
+
+  /**
+   * Gets the optional Cache-Control header
+   */
+  lazy val cacheControl: Option[String] = metadata.collectFirst {
+    case c: `Cache-Control` => c.value
+  }
 
   /**
    * Gets the value of the version id header. The version id will only be available
@@ -167,13 +180,6 @@ object S3Client {
 
   def apply()(implicit system: ActorSystem, mat: Materializer): S3Client =
     new S3Client(S3Settings(system.settings.config))
-
-  @deprecated("use apply(AWSCredentialsProvider, String) factory", "0.11")
-  def apply(credentials: OldAWSCredentials, region: String)(implicit system: ActorSystem, mat: Materializer): S3Client =
-    apply(
-      new AWSStaticCredentialsProvider(credentials.toAmazonCredentials()),
-      region
-    )
 
   def apply(credentialsProvider: AWSCredentialsProvider, region: String)(implicit system: ActorSystem,
                                                                          mat: Materializer): S3Client =
@@ -274,11 +280,13 @@ final class S3Client(val s3Settings: S3Settings)(implicit system: ActorSystem, m
    * @param sse [optional] the server side encryption used on upload
    * @return A [[akka.stream.scaladsl.Source Source]] of [[akka.util.ByteString ByteString]] and a [[scala.concurrent.Future Future]] containing the [[ObjectMetadata]]
    */
-  def download(bucket: String,
-               key: String,
-               range: Option[ByteRange] = None,
-               versionId: Option[String] = None,
-               sse: Option[ServerSideEncryption] = None): (Source[ByteString, NotUsed], Future[ObjectMetadata]) =
+  def download(
+      bucket: String,
+      key: String,
+      range: Option[ByteRange] = None,
+      versionId: Option[String] = None,
+      sse: Option[ServerSideEncryption] = None
+  ): Future[Option[(Source[ByteString, NotUsed], ObjectMetadata)]] =
     impl.download(S3Location(bucket, key), range, versionId, sse)
 
   /**

@@ -9,6 +9,7 @@ import java.util.Optional
 import java.util.concurrent.CompletionStage
 
 import scala.compat.java8.FutureConverters._
+import scala.compat.java8.OptionConverters._
 import akka.{Done, NotUsed}
 import akka.actor.ActorSystem
 import akka.http.javadsl.model.headers.ByteRange
@@ -19,7 +20,6 @@ import akka.japi.{Pair => JPair}
 import akka.stream.Materializer
 import akka.stream.alpakka.s3.{scaladsl, S3Settings}
 import akka.stream.alpakka.s3.acl.CannedAcl
-import akka.stream.alpakka.s3.auth.{AWSCredentials => OldAWSCredentials}
 import akka.stream.alpakka.s3.impl._
 import akka.stream.javadsl.{Sink, Source}
 import akka.util.ByteString
@@ -78,7 +78,7 @@ final class ObjectMetadata private[javadsl] (
    *         as calculated by Amazon S3.
    */
   lazy val getETag: Optional[String] =
-    scalaMetadata.eTag.fold(Optional.empty[String]())(Optional.of)
+    scalaMetadata.eTag.asJava
 
   /**
    * <p>
@@ -131,7 +131,7 @@ final class ObjectMetadata private[javadsl] (
    * @see ObjectMetadata#setContentType(String)
    */
   def getContentType: Optional[String] =
-    scalaMetadata.contentType.fold(Optional.empty[String]())(Optional.of)
+    scalaMetadata.contentType.asJava
 
   /**
    * Gets the value of the Last-Modified header, indicating the date
@@ -145,34 +145,28 @@ final class ObjectMetadata private[javadsl] (
     scalaMetadata.lastModified
 
   /**
+   * Gets the optional Cache-Control header
+   */
+  def getCacheControl: Optional[String] =
+    scalaMetadata.cacheControl.asJava
+
+  /**
    * Gets the value of the version id header. The version id will only be available
    * if the versioning is enabled in the bucket
    *
    * @return optional version id of the object
    */
-  def getVersionId: Optional[String] = scalaMetadata.versionId.fold(Optional.empty[String]())(Optional.of)
+  def getVersionId: Optional[String] = scalaMetadata.versionId.asJava
 }
 
 object MultipartUploadResult {
   def create(r: CompleteMultipartUploadResult): MultipartUploadResult =
-    new MultipartUploadResult(Uri.create(r.location),
-                              r.bucket,
-                              r.key,
-                              r.etag,
-                              r.versionId.fold(Optional.empty[String]())(Optional.of))
+    new MultipartUploadResult(Uri.create(r.location), r.bucket, r.key, r.etag, r.versionId.asJava)
 }
 
 object S3Client {
   def create(system: ActorSystem, mat: Materializer): S3Client =
     new S3Client(S3Settings(ConfigFactory.load()), system, mat)
-
-  @deprecated("use apply(AWSCredentialsProvider, String) factory", "0.11")
-  def create(credentials: OldAWSCredentials, region: String)(implicit system: ActorSystem,
-                                                             mat: Materializer): S3Client =
-    create(
-      new AWSStaticCredentialsProvider(credentials.toAmazonCredentials()),
-      region
-    )
 
   def create(credentialsProvider: AWSCredentialsProvider, region: String)(implicit system: ActorSystem,
                                                                           mat: Materializer): S3Client =
@@ -481,11 +475,11 @@ final class S3Client(s3Settings: S3Settings, system: ActorSystem, mat: Materiali
               sse)
 
   private def toJava[M](
-      download: (akka.stream.scaladsl.Source[ByteString, M], Future[scaladsl.ObjectMetadata])
-  ): JPair[Source[ByteString, M], CompletionStage[ObjectMetadata]] = {
-    val (stream, meta) = download
-    JPair(stream.asJava, meta.map(metaDataToJava)(mat.executionContext).toJava)
-  }
+      download: Future[Option[(akka.stream.scaladsl.Source[ByteString, M], scaladsl.ObjectMetadata)]]
+  ): CompletionStage[Optional[JPair[Source[ByteString, M], ObjectMetadata]]] =
+    download.map {
+      _.map { case (stream, meta) => JPair(stream.asJava, metaDataToJava(meta)) }.asJava
+    }(mat.executionContext).toJava
 
   /**
    * Downloads a S3 Object
@@ -494,7 +488,8 @@ final class S3Client(s3Settings: S3Settings, system: ActorSystem, mat: Materiali
    * @param key the s3 object key
    * @return A [[akka.japi.Pair]] with a [[akka.stream.javadsl.Source Source]] of [[akka.util.ByteString ByteString]], and a [[java.util.concurrent.CompletionStage CompletionStage]] containing the [[ObjectMetadata]]
    */
-  def download(bucket: String, key: String): JPair[Source[ByteString, NotUsed], CompletionStage[ObjectMetadata]] =
+  def download(bucket: String,
+               key: String): CompletionStage[Optional[JPair[Source[ByteString, NotUsed], ObjectMetadata]]] =
     toJava(impl.download(S3Location(bucket, key), None, None, None))
 
   /**
@@ -505,9 +500,11 @@ final class S3Client(s3Settings: S3Settings, system: ActorSystem, mat: Materiali
    * @param sse the server side encryption to use
    * @return A [[akka.japi.Pair]] with a [[akka.stream.javadsl.Source Source]] of [[akka.util.ByteString ByteString]], and a [[java.util.concurrent.CompletionStage CompletionStage]] containing the [[ObjectMetadata]]
    */
-  def download(bucket: String,
-               key: String,
-               sse: ServerSideEncryption): JPair[Source[ByteString, NotUsed], CompletionStage[ObjectMetadata]] =
+  def download(
+      bucket: String,
+      key: String,
+      sse: ServerSideEncryption
+  ): CompletionStage[Optional[JPair[Source[ByteString, NotUsed], ObjectMetadata]]] =
     toJava(impl.download(S3Location(bucket, key), None, None, Some(sse)))
 
   /**
@@ -520,7 +517,7 @@ final class S3Client(s3Settings: S3Settings, system: ActorSystem, mat: Materiali
    */
   def download(bucket: String,
                key: String,
-               range: ByteRange): JPair[Source[ByteString, NotUsed], CompletionStage[ObjectMetadata]] = {
+               range: ByteRange): CompletionStage[Optional[JPair[Source[ByteString, NotUsed], ObjectMetadata]]] = {
     val scalaRange = range.asInstanceOf[ScalaByteRange]
     toJava(impl.download(S3Location(bucket, key), Some(scalaRange), None, None))
   }
@@ -534,10 +531,12 @@ final class S3Client(s3Settings: S3Settings, system: ActorSystem, mat: Materiali
    * @param sse the server side encryption to use
    * @return A [[akka.japi.Pair]] with a [[akka.stream.javadsl.Source Source]] of [[akka.util.ByteString ByteString]], and a [[java.util.concurrent.CompletionStage CompletionStage]] containing the [[ObjectMetadata]]
    */
-  def download(bucket: String,
-               key: String,
-               range: ByteRange,
-               sse: ServerSideEncryption): JPair[Source[ByteString, NotUsed], CompletionStage[ObjectMetadata]] = {
+  def download(
+      bucket: String,
+      key: String,
+      range: ByteRange,
+      sse: ServerSideEncryption
+  ): CompletionStage[Optional[JPair[Source[ByteString, NotUsed], ObjectMetadata]]] = {
     val scalaRange = range.asInstanceOf[ScalaByteRange]
     toJava(impl.download(S3Location(bucket, key), Some(scalaRange), None, Some(sse)))
   }
@@ -552,11 +551,13 @@ final class S3Client(s3Settings: S3Settings, system: ActorSystem, mat: Materiali
    * @param sse the server side encryption to use
    * @return A [[akka.japi.Pair]] with a [[akka.stream.javadsl.Source Source]] of [[akka.util.ByteString ByteString]], and a [[java.util.concurrent.CompletionStage CompletionStage]] containing the [[ObjectMetadata]]
    */
-  def download(bucket: String,
-               key: String,
-               range: ByteRange,
-               versionId: Optional[String],
-               sse: ServerSideEncryption): JPair[Source[ByteString, NotUsed], CompletionStage[ObjectMetadata]] = {
+  def download(
+      bucket: String,
+      key: String,
+      range: ByteRange,
+      versionId: Optional[String],
+      sse: ServerSideEncryption
+  ): CompletionStage[Optional[JPair[Source[ByteString, NotUsed], ObjectMetadata]]] = {
     val scalaRange = range.asInstanceOf[ScalaByteRange]
     toJava(impl.download(S3Location(bucket, key), Option(scalaRange), Option(versionId.orElse(null)), Option(sse)))
   }

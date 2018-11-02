@@ -4,32 +4,45 @@
 
 package akka.stream.alpakka.jms
 
+import akka.Done
 import akka.stream.ActorAttributes.SupervisionStrategy
 import akka.stream._
+import akka.stream.alpakka.jms.JmsConnector.JmsConnectorStopping
+import akka.stream.alpakka.jms.JmsProducerMessage._
 import akka.stream.alpakka.jms.JmsProducerStage._
-import akka.stream.impl.{Buffer, ReactiveStreamsCompliance}
+import akka.stream.alpakka.jms.impl.JmsProducerMatValue
+import akka.stream.impl.Buffer
 import akka.stream.stage._
 import akka.util.OptionVal
-import javax.jms
-import javax.jms.{Connection, Session}
+import javax.jms.JMSException
 
 import scala.concurrent.Future
+import scala.util.control.NoStackTrace
 import scala.util.{Failure, Success, Try}
-import scala.util.control.{NoStackTrace, NonFatal}
 
-private[jms] final class JmsProducerStage[A <: JmsMessage](settings: JmsProducerSettings)
-    extends GraphStage[FlowShape[A, A]] {
+private[jms] final class JmsProducerStage[A <: JmsMessage, PassThrough](settings: JmsProducerSettings,
+                                                                        destination: Destination)
+    extends GraphStageWithMaterializedValue[FlowShape[Envelope[A, PassThrough], Envelope[A, PassThrough]],
+                                            JmsProducerMatValue] { stage =>
 
-  private val in = Inlet[A]("JmsProducer.in")
-  private val out = Outlet[A]("JmsProducer.out")
+  private type E = Envelope[A, PassThrough]
+  private val in = Inlet[E]("JmsProducer.in")
+  private val out = Outlet[E]("JmsProducer.out")
 
-  override def shape: FlowShape[A, A] = FlowShape.of(in, out)
+  override def shape: FlowShape[E, E] = FlowShape.of(in, out)
 
   override protected def initialAttributes: Attributes =
-    ActorAttributes.dispatcher("akka.stream.default-blocking-io-dispatcher")
+    ActorAttributes.dispatcher("akka.stream.default-blocking-io-dispatcher").and(Attributes.name("JmsProducer"))
 
-  override def createLogic(inheritedAttributes: Attributes): GraphStageLogic =
-    new GraphStageLogic(shape) with JmsConnector {
+  override def createLogicAndMaterializedValue(
+      inheritedAttributes: Attributes
+  ): (GraphStageLogic, JmsProducerMatValue) = {
+    val logic: TimerGraphStageLogic with JmsProducerConnector = producerLogic(inheritedAttributes)
+    (logic, logic.status)
+  }
+
+  private def producerLogic(inheritedAttributes: Attributes) =
+    new TimerGraphStageLogic(shape) with JmsProducerConnector with StageLogging {
 
       /*
        * NOTE: the following code is heavily inspired by akka.stream.impl.fusing.MapAsync
@@ -39,49 +52,71 @@ private[jms] final class JmsProducerStage[A <: JmsMessage](settings: JmsProducer
 
       private lazy val decider = inheritedAttributes.mandatoryAttribute[SupervisionStrategy].decider
 
+      // the current connection epoch. Reconnects increment this epoch by 1.
+      private var currentJmsProducerEpoch = 0
+
       // available producers for sending messages. Initially full, but might contain less elements if
       // messages are currently in-flight.
       private val jmsProducers: Buffer[JmsMessageProducer] = Buffer(settings.sessionCount, settings.sessionCount)
 
       // in-flight messages with the producers that were used to send them.
-      private val inFlightMessagesWithProducer: Buffer[Holder[A]] = Buffer(settings.sessionCount, settings.sessionCount)
+      private val inFlightMessages: Buffer[Holder[E]] =
+        Buffer(settings.sessionCount, settings.sessionCount)
 
-      protected def jmsSettings: JmsProducerSettings = settings
-
-      protected def createSession(connection: Connection, createDestination: Session => jms.Destination): JmsSession = {
-        val session =
-          connection.createSession(false, settings.acknowledgeMode.getOrElse(AcknowledgeMode.AutoAcknowledge).mode)
-        new JmsSession(connection, session, createDestination(session), settings.destination.get)
-      }
+      protected val destination: Destination = stage.destination
+      protected val jmsSettings: JmsProducerSettings = settings
 
       override def preStart(): Unit = {
-        jmsSessions = openSessions()
-        jmsSessions.foreach(jmsSession => jmsProducers.enqueue(JmsMessageProducer(jmsSession, settings)))
+        super.preStart()
         ec = executionContext(inheritedAttributes)
+        initSessionAsync()
+      }
+
+      override protected def onSessionOpened(jmsSession: JmsProducerSession): Unit =
+        sessionOpened(Try {
+          jmsProducers.enqueue(JmsMessageProducer(jmsSession, settings, currentJmsProducerEpoch))
+          // startup situation: while producer pool was empty, the out port might have pulled. If so, pull from in port.
+          // Note that a message might be already in-flight; that's fine since this stage pre-fetches message from
+          // upstream anyway to increase throughput once the stream is started.
+          if (isAvailable(out)) pullIfNeeded()
+        })
+
+      override protected def connectionFailed(ex: Throwable): Unit = {
+        jmsProducers.clear()
+        currentJmsProducerEpoch += 1
+        super.connectionFailed(ex)
       }
 
       setHandler(out, new OutHandler {
         override def onPull(): Unit = pushNextIfPossible()
+
+        override def onDownstreamFinish(): Unit = publishAndCompleteStage()
       })
 
       setHandler(
         in,
         new InHandler {
+          override def onUpstreamFinish(): Unit = if (inFlightMessages.isEmpty) publishAndCompleteStage()
 
-          override def onUpstreamFinish(): Unit = if (inFlightMessagesWithProducer.isEmpty) completeStage()
+          override def onUpstreamFailure(ex: Throwable): Unit = {
+            jmsSessions.foreach(s => Try(s.closeSession()))
+            publishAndFailStage(ex)
+          }
 
           override def onPush(): Unit = {
-            val elem: A = grab(in)
-            // fetch a jms producer from the pool, and create a holder object to capture the in-flight message.
-            val jmsProducer = jmsProducers.dequeue()
-            val holder = new Holder(NotYetThere, futureCB, jmsProducer)
-            inFlightMessagesWithProducer.enqueue(holder)
-
-            // send the element asynchronously, notifying the holder of (successful or failed) completion.
-            Future {
-              jmsProducer.send(elem)
-              elem
-            }.onComplete(holder)(akka.dispatch.ExecutionContexts.sameThreadExecutionContext)
+            val elem: E = grab(in)
+            elem match {
+              case m: Message[_, _] =>
+                // create a holder object to capture the in-flight message, and enqueue it to preserve message order
+                val holder = new Holder[E](NotYetThere)
+                inFlightMessages.enqueue(holder)
+                sendWithRetries(SendAttempt[E](m, holder))
+              case _: PassThroughMessage[_, _] =>
+                val holder = new Holder[E](NotYetThere)
+                inFlightMessages.enqueue(holder)
+                holder(Success(elem))
+                pushNextIfPossible()
+            }
 
             // immediately ask for the next element if producers are available.
             pullIfNeeded()
@@ -89,42 +124,90 @@ private[jms] final class JmsProducerStage[A <: JmsMessage](settings: JmsProducer
         }
       )
 
-      override def postStop(): Unit = {
+      private def publishAndCompleteStage(): Unit = {
+        val previous = updateState(JmsConnectorStopping(Success(Done)))
         jmsSessions.foreach(_.closeSession())
-        jmsConnection.foreach(_.close)
+        JmsConnector.connection(previous).foreach(_.close())
+        completeStage()
       }
 
-      private val futureCB = getAsyncCallback[Holder[A]](
-        holder =>
-          holder.elem match {
-            case Success(_) => pushNextIfPossible() // on success, try to push out the new element.
-            case Failure(ex) => handleFailure(ex, holder)
+      override def onTimer(timerKey: Any): Unit = timerKey match {
+        case s: SendAttempt[E] => sendWithRetries(s)
+        case _ => super.onTimer(timerKey)
+      }
+
+      private def sendWithRetries(send: SendAttempt[E]): Unit = {
+        import send._
+        if (jmsProducers.nonEmpty) {
+          val jmsProducer: JmsMessageProducer = jmsProducers.dequeue()
+          Future(jmsProducer.send(envelope.message)).andThen {
+            case tried => sendCompletedCB.invoke((send, tried, jmsProducer))
+          }
+        } else {
+          nextTryOrFail(send, RetrySkippedOnMissingConnection)
         }
-      )
+      }
+
+      def nextTryOrFail(send: SendAttempt[E], ex: Throwable): Unit = {
+        import send._
+        import settings.sendRetrySettings._
+        if (maxRetries < 0 || attempt + 1 <= maxRetries) {
+          val nextAttempt = attempt + 1
+          val delay = if (backoffMaxed) maxBackoff else waitTime(nextAttempt)
+          val backoffNowMaxed = backoffMaxed || delay == maxBackoff
+          scheduleOnce(send.copy(attempt = nextAttempt, backoffMaxed = backoffNowMaxed), delay)
+        } else {
+          holder(Failure(ex))
+          handleFailure(ex, holder)
+        }
+      }
+
+      private val sendCompletedCB = getAsyncCallback[(SendAttempt[E], Try[Unit], JmsMessageProducer)] {
+        case (send, outcome, jmsProducer) =>
+          // same epoch indicates that the producer belongs to the current alive connection.
+          if (jmsProducer.epoch == currentJmsProducerEpoch) jmsProducers.enqueue(jmsProducer)
+
+          import send._
+
+          outcome match {
+            case Success(_) =>
+              holder(Success(envelope))
+              pushNextIfPossible()
+            case Failure(t: JMSException) =>
+              nextTryOrFail(send, t)
+            case Failure(t) =>
+              holder(Failure(t))
+              handleFailure(t, holder)
+          }
+      }
+
+      override def postStop(): Unit = finishStop()
 
       private def pullIfNeeded(): Unit =
-        if (jmsProducers.nonEmpty && !hasBeenPulled(in)) tryPull(in) // only pull if a producer is available in the pool.
+        if (jmsProducers.nonEmpty // only pull if a producer is available in the pool.
+            && !inFlightMessages.isFull // and a place is available in the in-flight queue.
+            && !hasBeenPulled(in))
+          tryPull(in)
 
       private def pushNextIfPossible(): Unit =
-        if (inFlightMessagesWithProducer.isEmpty) {
+        if (inFlightMessages.isEmpty) {
           // no messages in flight, are we about to complete?
-          if (isClosed(in)) completeStage() else pullIfNeeded()
-        } else if (inFlightMessagesWithProducer.peek().elem eq NotYetThere) {
+          if (isClosed(in)) publishAndCompleteStage() else pullIfNeeded()
+        } else if (inFlightMessages.peek().elem eq NotYetThere) {
           // next message to be produced is still not there, we need to wait.
           pullIfNeeded()
         } else if (isAvailable(out)) {
-          val holder = inFlightMessagesWithProducer.dequeue()
+          val holder = inFlightMessages.dequeue()
           holder.elem match {
             case Success(elem) =>
               push(out, elem)
-              jmsProducers.enqueue(holder.jmsProducer) // put back jms producer to the pool.
               pullIfNeeded() // Ask for the next element.
 
-            case Failure(NonFatal(ex)) => handleFailure(ex, holder)
+            case Failure(ex) => handleFailure(ex, holder)
           }
         }
 
-      private def handleFailure(ex: Throwable, holder: Holder[A]): Unit =
+      private def handleFailure(ex: Throwable, holder: Holder[E]): Unit =
         holder.supervisionDirectiveFor(decider, ex) match {
           case Supervision.Stop => failStage(ex) // fail only if supervision asks for it.
           case _ => pushNextIfPossible()
@@ -141,8 +224,7 @@ private[jms] object JmsProducerStage {
    *
    * To get a condensed view of what the Holder is about, have a look there too.
    */
-  class Holder[A <: JmsMessage](var elem: Try[A], val cb: AsyncCallback[Holder[A]], val jmsProducer: JmsMessageProducer)
-      extends (Try[A] => Unit) {
+  class Holder[A](var elem: Try[A]) extends (Try[A] => Unit) {
 
     // To support both fail-fast when the supervision directive is Stop
     // and not calling the decider multiple times, we need to cache the decider result and re-use that
@@ -157,16 +239,11 @@ private[jms] object JmsProducerStage {
           d
       }
 
-    def setElem(t: Try[A]): Unit =
-      elem = t match {
-        case Success(null) => Failure[A](ReactiveStreamsCompliance.elementMustNotBeNullException)
-        case other => other
-      }
-
-    override def apply(t: Try[A]): Unit = {
-      // invoked on future completion: set the element, and call the stage's completion callback.
-      setElem(t)
-      cb.invoke(this)
-    }
+    override def apply(t: Try[A]): Unit = elem = t
   }
+
+  case class SendAttempt[E](envelope: Message[JmsMessage, _] with E,
+                            holder: Holder[E],
+                            attempt: Int = 0,
+                            backoffMaxed: Boolean = false)
 }

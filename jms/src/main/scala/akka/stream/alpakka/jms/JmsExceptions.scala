@@ -3,6 +3,8 @@
  */
 
 package akka.stream.alpakka.jms
+import scala.concurrent.TimeoutException
+import scala.util.control.NoStackTrace
 
 /**
  * Marker trait indicating that the exception thrown is persistent. The operation will always fail when retried.
@@ -34,3 +36,15 @@ case class NullMapMessageEntry(entryName: String, message: JmsMapMessage)
       s"null value was given for Jms MapMessage entry '$entryName'."
     )
     with NonRetriableJmsException
+
+case class ConnectionRetryException(message: String, cause: Throwable) extends Exception(message, cause)
+
+case object RetrySkippedOnMissingConnection
+    extends Exception("JmsProducer is not connected, send attempt skipped")
+    with NoStackTrace
+
+final case class StopMessageListenerException() extends Exception("Stopping MessageListener.")
+
+case object JmsNotConnected extends Exception("JmsConnector is not connected") with NoStackTrace
+
+case class JmsConnectTimedOut(message: String) extends TimeoutException(message)

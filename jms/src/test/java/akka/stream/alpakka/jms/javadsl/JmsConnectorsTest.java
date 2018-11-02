@@ -7,11 +7,13 @@ package akka.stream.alpakka.jms.javadsl;
 import akka.Done;
 import akka.NotUsed;
 import akka.actor.ActorSystem;
+import akka.japi.Pair;
 import akka.stream.ActorMaterializer;
-import akka.stream.KillSwitch;
 import akka.stream.Materializer;
 import akka.stream.alpakka.jms.*;
+import akka.stream.alpakka.jms.JmsProducerMessage.*;
 import akka.stream.javadsl.Flow;
+import akka.stream.javadsl.Keep;
 import akka.stream.javadsl.Sink;
 import akka.stream.javadsl.Source;
 import akka.testkit.javadsl.TestKit;
@@ -22,6 +24,9 @@ import org.apache.activemq.command.ActiveMQTextMessage;
 import org.junit.AfterClass;
 import org.junit.BeforeClass;
 import org.junit.Test;
+import scala.util.Failure;
+import scala.util.Success;
+import scala.util.Try;
 
 import javax.jms.ConnectionFactory;
 import javax.jms.DeliveryMode;
@@ -107,7 +112,7 @@ public class JmsConnectorsTest {
           // #run-text-sink
 
           // #create-text-source
-          Source<String, KillSwitch> jmsSource =
+          Source<String, JmsConsumerControl> jmsSource =
               JmsConsumer.textSource(
                   JmsConsumerSettings.create(connectionFactory)
                       .withQueue("test")
@@ -145,7 +150,7 @@ public class JmsConnectorsTest {
           // #run-object-sink
 
           // #create-object-source
-          Source<java.io.Serializable, KillSwitch> jmsSource =
+          Source<java.io.Serializable, JmsConsumerControl> jmsSource =
               JmsConsumer.objectSource(
                   JmsConsumerSettings.create(connectionFactory).withQueue("test"));
           // #create-object-source
@@ -178,7 +183,7 @@ public class JmsConnectorsTest {
           // #run-bytearray-sink
 
           // #create-bytearray-source
-          Source<byte[], KillSwitch> jmsSource =
+          Source<byte[], JmsConsumerControl> jmsSource =
               JmsConsumer.bytesSource(
                   JmsConsumerSettings.create(connectionFactory).withQueue("test"));
           // #create-bytearray-source
@@ -218,7 +223,7 @@ public class JmsConnectorsTest {
           // #run-map-sink
 
           // #create-map-source
-          Source<Map<String, Object>, KillSwitch> jmsSource =
+          Source<Map<String, Object>, JmsConsumerControl> jmsSource =
               JmsConsumer.mapSource(
                   JmsConsumerSettings.create(connectionFactory).withQueue("test"));
           // #create-map-source
@@ -262,7 +267,7 @@ public class JmsConnectorsTest {
           // #run-jms-sink
 
           // #create-jms-source
-          Source<Message, KillSwitch> jmsSource =
+          Source<Message, JmsConsumerControl> jmsSource =
               JmsConsumer.create(
                   JmsConsumerSettings.create(connectionFactory)
                       .withQueue("test")
@@ -318,7 +323,7 @@ public class JmsConnectorsTest {
 
           Source.from(msgsIn).runWith(jmsSink, materializer);
 
-          Source<Message, KillSwitch> jmsSource =
+          Source<Message, JmsConsumerControl> jmsSource =
               JmsConsumer.create(
                   JmsConsumerSettings.create(connectionFactory)
                       .withQueue("test")
@@ -365,7 +370,7 @@ public class JmsConnectorsTest {
           Source.from(msgsIn).runWith(jmsSink, materializer);
 
           // #create-jms-source-with-selector
-          Source<Message, KillSwitch> jmsSource =
+          Source<Message, JmsConsumerControl> jmsSource =
               JmsConsumer.create(
                   JmsConsumerSettings.create(connectionFactory)
                       .withQueue("test")
@@ -423,13 +428,13 @@ public class JmsConnectorsTest {
                   JmsProducerSettings.create(connectionFactory).withTopic("topic"));
 
           // #create-topic-source
-          Source<String, KillSwitch> jmsTopicSource =
+          Source<String, JmsConsumerControl> jmsTopicSource =
               JmsConsumer.textSource(
                   JmsConsumerSettings.create(connectionFactory)
                       .withTopic("topic")
                       .withBufferSize(10));
           // #create-topic-source
-          Source<String, KillSwitch> jmsTopicSource2 =
+          Source<String, JmsConsumerControl> jmsTopicSource2 =
               JmsConsumer.textSource(
                   JmsConsumerSettings.create(connectionFactory)
                       .withTopic("topic")
@@ -481,7 +486,7 @@ public class JmsConnectorsTest {
           Source.from(msgsIn).runWith(jmsSink, materializer);
 
           // #create-jms-source-client-ack
-          Source<Message, KillSwitch> jmsSource =
+          Source<Message, JmsConsumerControl> jmsSource =
               JmsConsumer.create(
                   JmsConsumerSettings.create(connectionFactory)
                       .withQueue("test")
@@ -517,7 +522,11 @@ public class JmsConnectorsTest {
           ConnectionFactory connectionFactory = new ActiveMQConnectionFactory(ctx.url);
 
           Sink<JmsTextMessage, CompletionStage<Done>> jmsSink =
-              JmsProducer.create(JmsProducerSettings.create(connectionFactory).withQueue("test"));
+              JmsProducer.create(
+                  JmsProducerSettings.create(connectionFactory)
+                      .withQueue("test")
+                      .withConnectionRetrySettings(
+                          ConnectionRetrySettings.create().withMaxRetries(0)));
 
           List<JmsTextMessage> msgsIn = createTestMessageList();
 
@@ -558,7 +567,11 @@ public class JmsConnectorsTest {
           ConnectionFactory connectionFactory = new ActiveMQConnectionFactory(ctx.url);
 
           Sink<JmsTextMessage, CompletionStage<Done>> jmsSink =
-              JmsProducer.create(JmsProducerSettings.create(connectionFactory).withQueue("test"));
+              JmsProducer.create(
+                  JmsProducerSettings.create(connectionFactory)
+                      .withQueue("test")
+                      .withConnectionRetrySettings(
+                          ConnectionRetrySettings.create().withMaxRetries(0)));
 
           List<JmsTextMessage> msgsIn = createTestMessageList();
 
@@ -577,6 +590,12 @@ public class JmsConnectorsTest {
                                 return m;
                               }))
                   .runWith(jmsSink, materializer);
+
+          try { // Make sure connection got started before stopping.
+            Thread.sleep(500);
+          } catch (InterruptedException e) {
+            fail("Sleep interrupted.");
+          }
 
           ctx.broker.stop();
 
@@ -649,7 +668,7 @@ public class JmsConnectorsTest {
                   JmsProducerSettings.create(producerConnectionFactory).withTopic("topic"));
 
           // #create-durable-topic-source
-          Source<String, KillSwitch> jmsTopicSource =
+          Source<String, JmsConsumerControl> jmsTopicSource =
               JmsConsumer.textSource(
                   JmsConsumerSettings.create(consumerConnectionFactory)
                       .withDurableTopic("topic", "durable-test"));
@@ -675,7 +694,7 @@ public class JmsConnectorsTest {
           ActiveMQConnectionFactory connectionFactory = new ActiveMQConnectionFactory(ctx.url);
 
           // #create-flow-producer
-          Flow<JmsTextMessage, JmsTextMessage, NotUsed> flowSink =
+          Flow<JmsTextMessage, JmsTextMessage, JmsProducerStatus> flowSink =
               JmsProducer.flow(JmsProducerSettings.create(connectionFactory).withQueue("test"));
           // #create-flow-producer
 
@@ -687,6 +706,160 @@ public class JmsConnectorsTest {
           // #run-flow-producer
 
           assertEquals(input, result.toCompletableFuture().get());
+        });
+  }
+
+  @Test
+  public void directedProducerFlow() throws Exception {
+    withServer(
+        ctx -> {
+          ActiveMQConnectionFactory connectionFactory = new ActiveMQConnectionFactory(ctx.url);
+
+          // #run-directed-flow-producer
+          Flow<JmsTextMessage, JmsTextMessage, JmsProducerStatus> flowSink =
+              JmsProducer.flow(JmsProducerSettings.create(connectionFactory).withQueue("test"));
+
+          List<JmsTextMessage> input = new ArrayList<>();
+          for (Integer n : Arrays.asList(1, 2, 3, 4, 5, 6, 7, 8, 9, 10)) {
+            String queueName = (n % 2 == 0) ? "even" : "odd";
+            input.add(JmsTextMessage.create(n.toString()).toQueue(queueName));
+          }
+
+          Source.from(input).via(flowSink).runWith(Sink.seq(), materializer);
+          // #run-directed-flow-producer
+
+          CompletionStage<List<Integer>> even =
+              JmsConsumer.textSource(
+                      JmsConsumerSettings.create(connectionFactory)
+                          .withBufferSize(10)
+                          .withQueue("even"))
+                  .take(5)
+                  .map(Integer::parseInt)
+                  .runWith(Sink.seq(), materializer);
+
+          CompletionStage<List<Integer>> odd =
+              JmsConsumer.textSource(
+                      JmsConsumerSettings.create(connectionFactory)
+                          .withBufferSize(10)
+                          .withQueue("odd"))
+                  .take(5)
+                  .map(Integer::parseInt)
+                  .runWith(Sink.seq(), materializer);
+
+          assertEquals(Arrays.asList(1, 3, 5, 7, 9), odd.toCompletableFuture().get());
+          assertEquals(Arrays.asList(2, 4, 6, 8, 10), even.toCompletableFuture().get());
+        });
+  }
+
+  @Test
+  public void failAfterRetry() throws Exception {
+    withServer(
+        ctx -> {
+          ConnectionFactory connectionFactory = new ActiveMQConnectionFactory(ctx.url);
+          ctx.broker.stop();
+          long startTime = System.currentTimeMillis();
+          CompletionStage<List<Message>> result =
+              JmsConsumer.create(
+                      JmsConsumerSettings.create(connectionFactory)
+                          .withConnectionRetrySettings(
+                              ConnectionRetrySettings.create().withMaxRetries(4))
+                          .withQueue("test"))
+                  .runWith(Sink.seq(), materializer);
+
+          CompletionStage<Try<List<Message>>> tryFuture =
+              result.handle(
+                  (l, e) -> {
+                    if (l != null) return Success.apply(l);
+                    else return Failure.apply(e);
+                  });
+
+          Try<List<Message>> tryResult = tryFuture.toCompletableFuture().get();
+          long endTime = System.currentTimeMillis();
+
+          assertTrue("Total retry is too short", endTime - startTime > 100L + 400L + 900L + 1600L);
+          assertTrue("Result must be a failure", tryResult.isFailure());
+          Throwable exception = tryResult.failed().get();
+          assertTrue(
+              "Did not fail with a ConnectionRetryException",
+              exception instanceof ConnectionRetryException);
+          assertTrue(
+              "Cause of failure is not a JMSException",
+              exception.getCause() instanceof JMSException);
+        });
+  }
+
+  @Test
+  public void passThroughMessageEnvelopes() throws Exception {
+    withServer(
+        ctx -> {
+          ActiveMQConnectionFactory connectionFactory = new ActiveMQConnectionFactory(ctx.url);
+          // #run-flexi-flow-producer
+          Flow<
+                  Envelope<JmsTextMessage, String>,
+                  Envelope<JmsTextMessage, String>,
+                  JmsProducerStatus>
+              jmsProducer =
+                  JmsProducer.flexiFlow(
+                      JmsProducerSettings.create(connectionFactory).withQueue("test"));
+
+          List<String> data = Arrays.asList("a", "b", "c", "d", "e", "f", "g", "h", "i", "j", "k");
+          List<Envelope<JmsTextMessage, String>> input = new ArrayList<>();
+          for (String s : data) {
+            input.add(JmsProducerMessage.message(JmsTextMessage.create(s), s));
+          }
+
+          CompletionStage<List<String>> result =
+              Source.from(input)
+                  .via(jmsProducer)
+                  .map(Envelope::passThrough)
+                  .runWith(Sink.seq(), materializer);
+          // #run-flexi-flow-producer
+          assertEquals(data, result.toCompletableFuture().get());
+        });
+  }
+
+  @Test
+  public void passThroughEmptyMessageEnvelopes() throws Exception {
+    withServer(
+        ctx -> {
+          ActiveMQConnectionFactory connectionFactory = new ActiveMQConnectionFactory(ctx.url);
+
+          Pair<JmsConsumerControl, CompletionStage<List<String>>> switchAndItems =
+              JmsConsumer.textSource(
+                      JmsConsumerSettings.create(connectionFactory)
+                          .withBufferSize(10)
+                          .withQueue("test"))
+                  .toMat(Sink.seq(), Keep.both())
+                  .run(materializer);
+
+          // #run-flexi-flow-pass-through-producer
+          Flow<
+                  Envelope<JmsTextMessage, String>,
+                  Envelope<JmsTextMessage, String>,
+                  JmsProducerStatus>
+              jmsProducer =
+                  JmsProducer.flexiFlow(
+                      JmsProducerSettings.create(connectionFactory).withQueue("test"));
+
+          List<String> data = Arrays.asList("a", "b", "c", "d", "e", "f", "g", "h", "i", "j", "k");
+          List<Envelope<JmsTextMessage, String>> input = new ArrayList<>();
+          for (String s : data) {
+            input.add(JmsProducerMessage.passThroughMessage(s));
+          }
+
+          CompletionStage<List<String>> result =
+              Source.from(input)
+                  .via(jmsProducer)
+                  .map(Envelope::passThrough)
+                  .runWith(Sink.seq(), materializer);
+          // #run-flexi-flow-pass-through-producer
+
+          assertEquals(data, result.toCompletableFuture().get());
+
+          Thread.sleep(500);
+
+          switchAndItems.first().shutdown();
+          assertTrue(switchAndItems.second().toCompletableFuture().get().isEmpty());
         });
   }
 

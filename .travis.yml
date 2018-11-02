@@ -46,6 +46,9 @@ jobs:
       - PRE_CMD="docker-compose up -d geode"
       - CMD=+geode/testChanged
     - env: CMD=+google-cloud-pub-sub/testChanged
+    - env:
+      - PRE_CMD="docker-compose up -d gcloud-pubsub-client"
+      - CMD=+google-cloud-pub-sub-grpc/testChanged
     - env: CMD=+google-fcm/testChanged
     - env: CMD=+hbase/testChanged
     - env: CMD=+hdfs/testChanged
@@ -65,6 +68,9 @@ jobs:
       - PRE_CMD="docker-compose up -d mqtt"
       - CMD=+mqtt/testChanged
     - env:
+      - PRE_CMD="docker-compose up -d mqtt"
+      - CMD=+mqtt-streaming/testChanged
+    - env:
       - PRE_CMD="docker-compose up -d orientdb"
       - CMD=+orientdb/testChanged
     - env: CMD=+reference/testChanged
@@ -72,7 +78,9 @@ jobs:
     - env: CMD=+spring-web/testChanged
     - env: CMD=+simple-codecs/testChanged
     - env: CMD=+slick/testChanged
-    - env: CMD=+sns/testChanged
+    - env:
+      - PRE_CMD="docker-compose up -d amazonsns"
+      - CMD=+sns/testChanged
     - env: CMD=+solr/testChanged
     - env: CMD=+sqs/testChanged
     - env: CMD=+sse/testChanged

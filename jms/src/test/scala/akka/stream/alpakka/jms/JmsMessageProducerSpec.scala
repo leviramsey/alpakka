@@ -26,10 +26,10 @@ class JmsMessageProducerSpec extends JmsSpec with MockitoSugar {
     when(session.createTextMessage(anyString())).thenReturn(textMessage)
     when(session.createMapMessage()).thenReturn(mapMessage)
 
-    val settings = JmsProducerSettings(factory, destination = Option(settingsDestination))
-    val jmsSession = new JmsSession(connection, session, destination, settingsDestination)
+    val settings = JmsProducerSettings(factory, destination = Some(settingsDestination))
+    val jmsSession = new JmsProducerSession(connection, session, destination)
 
-    val jmsProducer = JmsMessageProducer(jmsSession, settings)
+    val jmsProducer = JmsMessageProducer(jmsSession, settings, 0)
   }
 
   "populating Jms message properties" should {

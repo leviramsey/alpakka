@@ -11,6 +11,7 @@ lazy val modules: Seq[ProjectReference] = Seq(
   ftp,
   geode,
   googleCloudPubSub,
+  googleCloudPubSubGrpc,
   googleFcm,
   hbase,
   hdfs,
@@ -21,6 +22,7 @@ lazy val modules: Seq[ProjectReference] = Seq(
   kudu,
   mongodb,
   mqtt,
+  mqttStreaming,
   orientdb,
   reference,
   s3,
@@ -118,6 +120,18 @@ lazy val googleCloudPubSub = alpakkaProject(
   parallelExecution in Test := false
 )
 
+lazy val googleCloudPubSubGrpc = alpakkaProject(
+  "google-cloud-pub-sub-grpc",
+  "google.cloud.pubsub.grpc",
+  Dependencies.GooglePubSubGrpc,
+  akkaGrpcCodeGeneratorSettings ~= { _.filterNot(_ == "flat_package") },
+  akkaGrpcGeneratedSources := Seq(AkkaGrpc.Client),
+  akkaGrpcGeneratedLanguages := Seq(AkkaGrpc.Scala, AkkaGrpc.Java),
+  javaAgents += Dependencies.GooglePubSubGrpcAlpnAgent % "test",
+  // for the ExampleApp in the tests
+  connectInput in run := true
+).enablePlugins(AkkaGrpcPlugin, JavaAgent)
+
 lazy val googleFcm = alpakkaProject(
   "google-fcm",
   "google.firebase.fcm",
@@ -146,6 +160,11 @@ lazy val kudu = alpakkaProject("kudu", "kudu", Dependencies.Kudu, fork in Test :
 lazy val mongodb = alpakkaProject("mongodb", "mongodb", Dependencies.MongoDb)
 
 lazy val mqtt = alpakkaProject("mqtt", "mqtt", Dependencies.Mqtt)
+
+lazy val mqttStreaming = alpakkaProject("mqtt-streaming", "mqttStreaming", Dependencies.MqttStreaming)
+lazy val mqttStreamingBench = alpakkaProject("mqtt-streaming-bench", "mqttStreamingBench", Seq.empty)
+  .enablePlugins(JmhPlugin)
+  .dependsOn(mqtt, mqttStreaming)
 
 lazy val orientdb = alpakkaProject("orientdb",
                                    "orientdb",
@@ -196,36 +215,37 @@ lazy val unixdomainsocket = alpakkaProject(
 lazy val xml = alpakkaProject("xml", "xml", Dependencies.Xml)
 
 lazy val docs = project
-  .enablePlugins(ParadoxPlugin)
+  .enablePlugins(AkkaParadoxPlugin)
   .disablePlugins(BintrayPlugin, MimaPlugin)
   .settings(
     name := "Alpakka",
     publish / skip := true,
-    paradoxTheme := Some(builtinParadoxTheme("generic")),
     paradoxProperties ++= Map(
-      "version" -> version.value,
-      "scalaVersion" -> scalaVersion.value,
-      "scalaBinaryVersion" -> scalaBinaryVersion.value,
-      "akkaVersion" -> Dependencies.AkkaVersion,
-      "akkaHttpVersion" -> Dependencies.AkkaHttpVersion,
+      "project.url" -> "https://developer.lightbend.com/docs/alpakka/current/",
+      "akka.version" -> Dependencies.AkkaVersion,
+      "akka-http.version" -> Dependencies.AkkaHttpVersion,
       "extref.akka-docs.base_url" -> s"http://doc.akka.io/docs/akka/${Dependencies.AkkaVersion}/%s",
       "extref.akka-http-docs.base_url" -> s"http://doc.akka.io/docs/akka-http/${Dependencies.AkkaHttpVersion}/%s",
       "extref.java-api.base_url" -> "https://docs.oracle.com/javase/8/docs/api/index.html?%s.html",
-      "extref.geode.base_url" -> "https://geode.apache.org/docs/guide/16/%s",
+      "extref.geode.base_url" -> "https://geode.apache.org/docs/guide/17/%s",
       "extref.javaee-api.base_url" -> "https://docs.oracle.com/javaee/7/api/index.html?%s.html",
       "extref.paho-api.base_url" -> "https://www.eclipse.org/paho/files/javadoc/index.html?%s.html",
       "extref.slick.base_url" -> s"https://slick.lightbend.com/doc/${Dependencies.SlickVersion}/%s",
       "javadoc.base_url" -> "https://docs.oracle.com/javase/8/docs/api/",
       "javadoc.javax.jms.base_url" -> "https://docs.oracle.com/javaee/7/api/",
+      "javadoc.org.apache.kudu.base_url" -> s"https://kudu.apache.org/releases/${Dependencies.KuduVersion}/apidocs/",
       "javadoc.akka.base_url" -> s"http://doc.akka.io/japi/akka/${Dependencies.AkkaVersion}/",
       "javadoc.akka.http.base_url" -> s"http://doc.akka.io/japi/akka-http/${Dependencies.AkkaHttpVersion}/",
       "javadoc.org.apache.hadoop.base_url" -> s"https://hadoop.apache.org/docs/r${Dependencies.HadoopVersion}/api/",
+      // Eclipse Paho client for MQTT
+      "javadoc.org.eclipse.paho.client.mqttv3.base_url" -> "http://www.eclipse.org/paho/files/javadoc/",
       "scaladoc.scala.base_url" -> s"http://www.scala-lang.org/api/current/",
       "scaladoc.akka.base_url" -> s"http://doc.akka.io/api/akka/${Dependencies.AkkaVersion}",
       "scaladoc.akka.http.base_url" -> s"https://doc.akka.io/api/akka-http/${Dependencies.AkkaHttpVersion}/",
       "scaladoc.akka.stream.alpakka.base_url" -> s"http://developer.lightbend.com/docs/api/alpakka/${version.value}"
     ),
-    paradoxGroups := Map("Language" -> Seq("Scala", "Java")),
+    resolvers += Resolver.jcenterRepo,
+    paradoxGroups := Map("Language" -> Seq("Java", "Scala")),
     paradoxLocalApiKey := "scaladoc.akka.stream.alpakka.base_url",
     paradoxLocalApiDir := (alpakka / Compile / sbtunidoc.BaseUnidocPlugin.autoImport.unidoc).value.head,
   )
